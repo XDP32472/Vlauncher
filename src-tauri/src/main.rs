@@ -59,6 +59,12 @@ struct GameOs { name:Option<String>, arch:Option<String> }
 #[derive(Serialize)]
 #[serde(rename_all="camelCase")]
 struct GameClientResult { version_id:String, size:u64, client_jar:String, libraries:u32, assets:u32 }
+#[derive(Deserialize)]
+struct FabricLibrary { name:String, url:String, sha1:String, size:u64 }
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+struct FabricInstallResult { loader_version:String, profile_id:String, libraries:u32 }
+
 fn valid_mojang_url(raw:&str)->Result<reqwest::Url,String>{
  let u=reqwest::Url::parse(raw).map_err(|e|e.to_string())?;
  let host=u.host_str().unwrap_or("");
@@ -185,6 +191,71 @@ async fn install_game_client(state:tauri::State<'_,State>,profile_id:String)->Re
 }
 
 
+
+fn fabric_library_path(coordinate:&str)->Result<String,String>{
+ let parts:Vec<_>=coordinate.split(':').collect();
+ if !(3..=4).contains(&parts.len()){return Err("Nieprawidłowe współrzędne biblioteki Fabric".into())}
+ let group=parts[0];let artifact=parts[1];let version_ext=parts[2];
+ if group.is_empty()||artifact.is_empty()||version_ext.is_empty()
+   ||!group.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_')
+   ||!artifact.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_'||b==b'-'){
+  return Err("Nieprawidłowe współrzędne biblioteki Fabric".into())
+ }
+ let (version,extension)=version_ext.split_once('@').unwrap_or((version_ext,"jar"));
+ if !extension.eq_ignore_ascii_case("jar")||!version.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_'||b==b'-'||b==b'+'){
+  return Err("Nieobsługiwany typ biblioteki Fabric".into())
+ }
+ let classifier=if parts.len()==4{format!("-{}",parts[3])}else{String::new()};
+ if parts.len()==4&&!parts[3].bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_'||b==b'-'){
+  return Err("Nieprawidłowa klasyfikacja biblioteki Fabric".into())
+ }
+ Ok(format!("{}/{}/{}/{}-{}{}.jar",group.replace('.','/'),artifact,version,artifact,version,classifier))
+}
+#[tauri::command]
+async fn install_fabric_loader(state:tauri::State<'_,State>,profile_id:String)->Result<FabricInstallResult,String>{
+ let p=profile(&state,&profile_id)?;
+ if p.loader!="fabric"{return Err("Fabric można zainstalować tylko w profilu Fabric".into())}
+ let c=http()?;
+ let list_url=format!("https://meta.fabricmc.net/v2/versions/loader/{}",p.minecraft_version);
+ let versions=c.get(list_url).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<Vec<serde_json::Value>>().await.map_err(|e|e.to_string())?;
+ let selected=versions.iter().find(|v|v.pointer("/loader/stable").and_then(|x|x.as_bool())==Some(true)).or_else(||versions.first()).ok_or("Fabric nie udostępnia loadera dla tej wersji Minecrafta")?;
+ let loader_version=selected.pointer("/loader/version").and_then(|x|x.as_str()).ok_or("Metadane Fabric nie zawierają wersji loadera")?.to_owned();
+ if loader_version.len()>64||!loader_version.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'-'||b==b'_'||b==b'+'){
+  return Err("Fabric zwrócił nieprawidłowy numer wersji".into())
+ }
+ let profile_url=format!("https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",p.minecraft_version,loader_version);
+ let profile_json=c.get(profile_url).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<serde_json::Value>().await.map_err(|e|e.to_string())?;
+ let loader_id=profile_json.get("id").and_then(|x|x.as_str()).ok_or("Profil Fabric nie zawiera identyfikatora")?.to_owned();
+ if profile_json.get("inheritsFrom").and_then(|x|x.as_str())!=Some(p.minecraft_version.as_str()){
+  return Err("Profil Fabric wskazuje inną wersję Minecrafta".into())
+ }
+ let libs=serde_json::from_value::<Vec<FabricLibrary>>(profile_json.get("libraries").cloned().ok_or("Profil Fabric nie zawiera bibliotek")?).map_err(|e|e.to_string())?;
+ let root=state.paths.shared().join("libraries");
+ for lib in &libs{
+  if lib.size>MAX_MOD_BYTES{return Err("Biblioteka Fabric przekracza limit 512 MiB".into())}
+  let relative=fabric_library_path(&lib.name)?;
+  let base=reqwest::Url::parse(&lib.url).map_err(|e|e.to_string())?;
+  if base.scheme()!="https"||base.host_str()!=Some("maven.fabricmc.net")||!base.path().ends_with('/'){
+   return Err("Nieoczekiwany serwer biblioteki Fabric".into())
+  }
+  let url=base.join(&relative).map_err(|e|e.to_string())?;
+  let dest=safe_join(&root,&relative).map_err(|e|e.to_string())?;
+  let present=if dest.exists(){let bytes=fs::read(&dest).map_err(|e|e.to_string())?;bytes.len()as u64==lib.size&&hex::encode(sha1::Sha1::digest(&bytes)).eq_ignore_ascii_case(&lib.sha1)}else{false};
+  if !present{
+   let bytes=c.get(url).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.bytes().await.map_err(|e|e.to_string())?;
+   if bytes.len()as u64!=lib.size||!hex::encode(sha1::Sha1::digest(&bytes)).eq_ignore_ascii_case(&lib.sha1){return Err(format!("Weryfikacja biblioteki Fabric {} nie powiodła się",lib.name))}
+   if let Some(parent)=dest.parent(){fs::create_dir_all(parent).map_err(|e|e.to_string())?}
+   fs::write(dest,&bytes).map_err(|e|e.to_string())?;
+  }
+ }
+ let game=mods_dir(&state,&p)?.parent().ok_or("Nie można ustalić katalogu gry")?.to_path_buf();
+ let version_dir=safe_join(&game,&format!("versions/{}",loader_id)).map_err(|e|e.to_string())?;
+ fs::create_dir_all(&version_dir).map_err(|e|e.to_string())?;
+ let metadata=safe_join(&version_dir,&format!("{}.json",loader_id)).map_err(|e|e.to_string())?;
+ fs::write(metadata,serde_json::to_vec_pretty(&profile_json).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+ Ok(FabricInstallResult{loader_version,profile_id:loader_id,libraries:libs.len()as u32})
+}
+
 #[tauri::command]fn app_status()->String{"Vlauncher 0.1 · profile and mod management".into()}
 #[tauri::command]fn list_profiles(state:tauri::State<'_,State>)->Result<ProfileResult,String>{let s=read_store(&state)?;let active=state.active.lock().map_err(|e|e.to_string())?.clone().or(s.active_profile_id).or_else(||s.profiles.first().map(|p|p.id.clone()));Ok(ProfileResult{profiles:s.profiles,active_profile_id:active})}
 #[tauri::command]fn create_profile(state:tauri::State<'_,State>,name:String,minecraft_version:String,loader:String)->Result<Profile,String>{let name=name.trim();let v=minecraft_version.trim();let l=loader.to_lowercase();if name.is_empty()||name.len()>48{return Err("Nazwa profilu musi mieć od 1 do 48 znaków".into())}if v.is_empty()||v.len()>32||!v.chars().all(|c|c.is_ascii_alphanumeric()||c=='.'||c=='-'){return Err("Nieprawidłowa wersja Minecrafta".into())}if l!="fabric"&&l!="vanilla"{return Err("Obsługiwane profile: Fabric lub Vanilla".into())}let p=Profile{id:uuid::Uuid::new_v4().simple().to_string(),name:name.into(),minecraft_version:v.into(),loader:l};let mut s=read_store(&state)?;s.profiles.push(p.clone());s.active_profile_id=Some(p.id.clone());write_store(&state,&s)?;*state.active.lock().map_err(|e|e.to_string())?=Some(p.id.clone());fs::create_dir_all(mods_dir(&state,&p)?).map_err(|e|e.to_string())?;Ok(p)}
@@ -192,4 +263,4 @@ async fn install_game_client(state:tauri::State<'_,State>,profile_id:String)->Re
 #[tauri::command]fn list_installed_mods(state:tauri::State<'_,State>,profile_id:String)->Result<Vec<Installed>,String>{let p=profile(&state,&profile_id)?;let _=mods_dir(&state,&p)?;installed(&state,&p)}
 #[tauri::command]async fn install_mod(state:tauri::State<'_,State>,profile_id:String,project_id:String,minecraft_version:String,loader:String)->Result<Installed,String>{let p=profile(&state,&profile_id)?;if p.loader!="fabric"||loader!="fabric"{return Err("Mody są obecnie dostępne tylko dla profili Fabric".into())}if project_id.len()>64||!project_id.chars().all(|c|c.is_ascii_alphanumeric()||c=='_'||c=='-'){return Err("Nieprawidłowy identyfikator moda".into())}let c=http()?;let versions=c.get(format!("{API}/project/{project_id}/version")).query(&[("game_versions",format!("[\"{minecraft_version}\"]")),("loaders","[\"fabric\"]".to_string())]).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<Vec<Version>>().await.map_err(|e|e.to_string())?;let ver=versions.into_iter().next().ok_or("Brak zgodnej wersji moda")?;if ver.dependencies.iter().any(|x|x.dependency_type=="required"){return Err("Mod wymaga zależności, których instalacja automatyczna jeszcze nie obsługuje.".into())}let f=ver.files.into_iter().find(|x|x.primary).ok_or("Modrinth nie podał głównego pliku")?;if f.size>MAX_MOD_BYTES{return Err("Plik przekracza limit 512 MiB".into())}let u=reqwest::Url::parse(&f.url).map_err(|e|e.to_string())?;if u.scheme()!="https"||u.host_str()!=Some("cdn.modrinth.com"){return Err("Nieoczekiwany serwer pliku".into())}let b=c.get(u).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.bytes().await.map_err(|e|e.to_string())?;if b.len()as u64!=f.size{return Err("Rozmiar pliku nie zgadza się z manifestem".into())}let hash=hex::encode(Sha512::digest(&b));if hash!=f.hashes.sha512{return Err("Weryfikacja SHA-512 nie powiodła się".into())}let path=safe_join(&mods_dir(&state,&p)?,&f.filename).map_err(|e|e.to_string())?;fs::write(path,&b).map_err(|e|e.to_string())?;let item=Installed{project_id,file_name:f.filename,sha512:hash};let mut all=installed(&state,&p)?;all.retain(|x|x.project_id!=item.project_id);all.push(item.clone());launcher_core::store::write_json_atomic(&installed_path(&state,&p)?,&all).map_err(|e|e.to_string())?;Ok(item)}
 #[tauri::command]fn remove_mod(state:tauri::State<'_,State>,profile_id:String,project_id:String)->Result<(),String>{let p=profile(&state,&profile_id)?;let mut all=installed(&state,&p)?;if let Some(i)=all.iter().position(|x|x.project_id==project_id){let path=safe_join(&mods_dir(&state,&p)?,&all[i].file_name).map_err(|e|e.to_string())?;if path.exists(){fs::remove_file(path).map_err(|e|e.to_string())?}all.remove(i);}launcher_core::store::write_json_atomic(&installed_path(&state,&p)?,&all).map_err(|e|e.to_string())}
-fn main(){tauri::Builder::default().setup(|app|{let paths=AppPaths::resolve().map_err(|e|std::io::Error::other(e.to_string()))?;paths.ensure_layout().map_err(|e|std::io::Error::other(e.to_string()))?;app.manage(State{paths,active:Mutex::new(None)});Ok(())}).invoke_handler(tauri::generate_handler![app_status,list_profiles,create_profile,search_modrinth,list_installed_mods,install_mod,remove_mod,install_game_client]).run(tauri::generate_context!()).expect("failed to run Vlauncher");}
+fn main(){tauri::Builder::default().setup(|app|{let paths=AppPaths::resolve().map_err(|e|std::io::Error::other(e.to_string()))?;paths.ensure_layout().map_err(|e|std::io::Error::other(e.to_string()))?;app.manage(State{paths,active:Mutex::new(None)});Ok(())}).invoke_handler(tauri::generate_handler![app_status,list_profiles,create_profile,search_modrinth,list_installed_mods,install_mod,remove_mod,install_game_client,install_fabric_loader]).run(tauri::generate_context!()).expect("failed to run Vlauncher");}
