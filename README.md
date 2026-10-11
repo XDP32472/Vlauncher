@@ -4,9 +4,9 @@ Open-source launcher Minecrafta skupiony na profilach, modach i mierzalnej wydaj
 
 ## Stan projektu
 
-Aplikacja zawiera nowoczesny interfejs desktopowy, profile Vanilla/Fabric oraz wyszukiwanie, instalację i podgląd modów z Modrinth w profilach Fabric. Pobrane pliki są sprawdzane przez SHA-512 i przechowywane w katalogu użytkownika.
+Aplikacja zawiera nowoczesny interfejs desktopowy, profile Vanilla/Fabric, wyszukiwanie/instalację/podgląd modów z Modrinth oraz pobieranie bazowych plików wybranej wersji Minecrafta (klient, biblioteki, natywne pliki Windows i zasoby). Pliki są weryfikowane przez SHA-512 lub SHA-1 i przechowywane w katalogu użytkownika.
 
-Instalowanie plików gry Minecraft, Java runtime, logowanie Microsoft i uruchamianie gry są w budowie. Benchmark FPS ma [protokół v1](docs/benchmark-protocol-v1.md), lecz zbieranie rzeczywistych pomiarów jeszcze nie działa. Launcher nie pokazuje fikcyjnych wyników. Wymagane zależności modów nie są instalowane automatycznie.
+Fabric loader, Java runtime, logowanie Microsoft i uruchamianie gry są w budowie. Benchmark FPS ma [protokół v1](docs/benchmark-protocol-v1.md), lecz zbieranie rzeczywistych pomiarów jeszcze nie działa. Launcher nie pokazuje fikcyjnych wyników. Wymagane zależności modów nie są instalowane automatycznie.
 
 Projekt jest niezależny od Mojang i Microsoft. Licencja: MIT.
 
