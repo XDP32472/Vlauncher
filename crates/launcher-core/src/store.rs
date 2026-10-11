@@ -46,7 +46,7 @@ impl Config {
 }
 
 pub fn load_config(paths: &AppPaths) -> Result<Config, StoreError> {
-    let Some(config) = read_json(&paths.config_file())? else {
+    let Some(config) = read_json::<Config>(&paths.config_file())? else {
         return Ok(Config::default());
     };
 
