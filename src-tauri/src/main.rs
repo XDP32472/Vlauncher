@@ -76,7 +76,7 @@ async fn install_game_client(state:tauri::State<'_,State>,profile_id:String)->Re
  if info.id!=p.minecraft_version{return Err("Identyfikator wersji w metadanych jest niezgodny".into())}
  let client=info.downloads.get("client").ok_or("Ta wersja nie udostępnia pliku klienta")?;
  let jar=verified_mojang_download(&c,&client.url,&client.sha1,client.size).await?;
- let game=mods_dir(&state,&p)?.parent().and_then(|x|x.parent()).ok_or("Nie można ustalić katalogu gry")?.to_path_buf();
+ let game=mods_dir(&state,&p)?.parent().ok_or("Nie można ustalić katalogu gry")?.to_path_buf();
  let json_rel=format!("versions/{}/{}.json",p.minecraft_version,p.minecraft_version);
  let jar_rel=format!("versions/{}/{}.jar",p.minecraft_version,p.minecraft_version);
  let json_path=safe_join(&game,&json_rel).map_err(|e|e.to_string())?;
