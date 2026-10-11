@@ -209,7 +209,7 @@ fn fabric_library_path(coordinate:&str)->Result<String,String>{
  if parts.len()==4&&!parts[3].bytes().all(|b|b.is_ascii_alphanumeric()||b==b'.'||b==b'_'||b==b'-'){
   return Err("Nieprawidłowa klasyfikacja biblioteki Fabric".into())
  }
- Ok(format!("{}/{}/{}/{}-{}{}.jar",group.replace('.','/'),artifact,version,artifact,version,classifier))
+ Ok(format!("{}/{}/{}/{}-{}{}.jar",group.replace('.', "/"),artifact,version,artifact,version,classifier))
 }
 #[tauri::command]
 async fn install_fabric_loader(state:tauri::State<'_,State>,profile_id:String)->Result<FabricInstallResult,String>{
@@ -226,6 +226,9 @@ async fn install_fabric_loader(state:tauri::State<'_,State>,profile_id:String)->
  let profile_url=format!("https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",p.minecraft_version,loader_version);
  let profile_json=c.get(profile_url).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<serde_json::Value>().await.map_err(|e|e.to_string())?;
  let loader_id=profile_json.get("id").and_then(|x|x.as_str()).ok_or("Profil Fabric nie zawiera identyfikatora")?.to_owned();
+ if loader_id.len()>128||!loader_id.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'||b==b'.'){
+  return Err("Profil Fabric zawiera nieprawidłowy identyfikator".into())
+ }
  if profile_json.get("inheritsFrom").and_then(|x|x.as_str())!=Some(p.minecraft_version.as_str()){
   return Err("Profil Fabric wskazuje inną wersję Minecrafta".into())
  }
