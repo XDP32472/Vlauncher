@@ -1,4 +1,3 @@
-Warning: fs was declared with const; use let for reassignable variables.
 use std::{collections::HashMap,fs,io::{Cursor,Read},path::PathBuf,process::{Command,Stdio},sync::Mutex,time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
 use futures_util::{stream,StreamExt};
 use serde::{Deserialize,Serialize};
