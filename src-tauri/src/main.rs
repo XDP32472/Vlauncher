@@ -1,12 +1,24 @@
-use std::{fs,io::{Cursor,Read},path::PathBuf,sync::Mutex,time::Duration};
+use std::{fs,io::{Cursor,Read},path::PathBuf,sync::Mutex,time::{Duration,Instant}};
 use futures_util::{stream,StreamExt};
 use serde::{Deserialize,Serialize};
 use tauri::Manager;
 use sha2::{Digest,Sha256,Sha512};
 use launcher_core::paths::{AppPaths,InstanceId,safe_join};
-const API:&str="https://api.modrinth.com/v2";
+
+#[derive(Clone)]
+struct DeviceFlow { client_id:String, device_code:String, expires_at:Instant, interval_secs:u64 }
+#[derive(Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+struct MinecraftAccount { id:String, name:String, client_id:String }
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+struct DeviceCodeResult { user_code:String, verification_uri:String, expires_in:u64, interval:u64 }
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+struct LoginPollResult { pending:bool, retry_after_secs:Option<u64>, account:Option<MinecraftAccount> }
+\nconst API:&str="https://api.modrinth.com/v2";
 const MAX_MOD_BYTES:u64=536870912;
-struct State{paths:AppPaths,active:Mutex<Option<String>>}
+struct State{paths:AppPaths,active:Mutex<Option<String>>,device_flow:Mutex<Option<DeviceFlow>>}
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
 struct Profile{id:String,name:String,minecraft_version:String,loader:String}
@@ -342,11 +354,102 @@ async fn install_fabric_loader(state:tauri::State<'_,State>,profile_id:String)->
  Ok(FabricInstallResult{loader_version,profile_id:loader_id,libraries:libs.len()as u32})
 }
 
-#[tauri::command]fn app_status()->String{"Vlauncher 0.1 · profile and mod management".into()}
+
+async fn auth_json(c:&reqwest::Client,url:&str,payload:serde_json::Value,label:&str)->Result<serde_json::Value,String>{
+ let response=c.post(url).json(&payload).send().await.map_err(|e|e.to_string())?;
+ let status=response.status();
+ let body=response.json::<serde_json::Value>().await.map_err(|e|format!("{label}: nieprawidłowa odpowiedź"))?;
+ if !status.is_success(){return Err(format!("{label}: serwer odrzucił żądanie (HTTP {})",status.as_u16()))}
+ Ok(body)
+}
+#[tauri::command]
+async fn start_microsoft_login(state:tauri::State<'_,State>,client_id:String)->Result<DeviceCodeResult,String>{
+ let client_id=client_id.trim().to_owned();
+ if client_id.len()!=36||!client_id.bytes().enumerate().all(|(i,b)|if [8,13,18,23].contains(&i){b==b'-'}else{b.is_ascii_hexdigit()}){
+  return Err("Podaj identyfikator aplikacji Microsoft w formacie GUID".into())
+ }
+ let c=http()?;
+ let response=c.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode")
+  .form(&[("client_id",client_id.as_str()),("scope","XboxLive.signin offline_access")])
+  .send().await.map_err(|e|e.to_string())?;
+ let status=response.status();
+ let body=response.json::<serde_json::Value>().await.map_err(|e|e.to_string())?;
+ if !status.is_success(){return Err(body.get("error_description").and_then(|x|x.as_str()).unwrap_or("Microsoft odrzucił żądanie logowania").to_owned())}
+ let device_code=body.get("device_code").and_then(|x|x.as_str()).ok_or("Microsoft nie zwrócił kodu urządzenia")?.to_owned();
+ let user_code=body.get("user_code").and_then(|x|x.as_str()).ok_or("Microsoft nie zwrócił kodu użytkownika")?.to_owned();
+ let verification_uri=body.get("verification_uri").and_then(|x|x.as_str()).or_else(||body.get("verification_url").and_then(|x|x.as_str())).ok_or("Microsoft nie podał strony logowania")?.to_owned();
+ let expires_in=body.get("expires_in").and_then(|x|x.as_u64()).unwrap_or(900).clamp(60,1800);
+ let interval=body.get("interval").and_then(|x|x.as_u64()).unwrap_or(5).clamp(1,30);
+ *state.device_flow.lock().map_err(|e|e.to_string())?=Some(DeviceFlow{client_id,device_code,expires_at:Instant::now()+Duration::from_secs(expires_in),interval_secs:interval});
+ Ok(DeviceCodeResult{user_code,verification_uri,expires_in,interval})
+}
+#[tauri::command]
+async fn poll_microsoft_login(state:tauri::State<'_,State>)->Result<LoginPollResult,String>{
+ let flow=state.device_flow.lock().map_err(|e|e.to_string())?.clone().ok_or("Nie rozpoczęto logowania Microsoft")?;
+ if Instant::now()>=flow.expires_at{
+  *state.device_flow.lock().map_err(|e|e.to_string())?=None;
+  return Err("Kod logowania wygasł. Rozpocznij ponownie.".into())
+ }
+ let c=http()?;
+ let response=c.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
+  .form(&[("grant_type","urn:ietf:params:oauth:grant-type:device_code"),("client_id",flow.client_id.as_str()),("device_code",flow.device_code.as_str())])
+  .send().await.map_err(|e|e.to_string())?;
+ let status=response.status();
+ let token=response.json::<serde_json::Value>().await.map_err(|e|e.to_string())?;
+ if !status.is_success(){
+  match token.get("error").and_then(|x|x.as_str()).unwrap_or("") {
+   "authorization_pending"=>return Ok(LoginPollResult{pending:true,retry_after_secs:Some(flow.interval_secs),account:None}),
+   "slow_down"=>{
+    if let Some(mut current)=state.device_flow.lock().map_err(|e|e.to_string())?.as_mut(){current.interval_secs=(current.interval_secs+5).min(30);}
+    return Ok(LoginPollResult{pending:true,retry_after_secs:Some(flow.interval_secs+5),account:None})
+   },
+   "authorization_declined"|"expired_token"=>{
+    *state.device_flow.lock().map_err(|e|e.to_string())?=None;
+    return Err("Logowanie Microsoft zostało anulowane lub wygasło.".into())
+   },
+   _=>return Err(token.get("error_description").and_then(|x|x.as_str()).unwrap_or("Logowanie Microsoft nie powiodło się").to_owned())
+  }
+ }
+ let access=token.get("access_token").and_then(|x|x.as_str()).ok_or("Microsoft nie zwrócił tokenu dostępu")?;
+ let refresh=token.get("refresh_token").and_then(|x|x.as_str()).ok_or("Microsoft nie zwrócił tokenu odświeżania; wymagane jest uprawnienie offline_access")?;
+ let xbox=auth_json(&c,"https://user.auth.xboxlive.com/user/authenticate",serde_json::json!({"Properties":{"AuthMethod":"RPS","SiteName":"user.auth.xboxlive.com","RpsTicket":format!("d={access}")},"RelyingParty":"http://auth.xboxlive.com","TokenType":"JWT"}),"Xbox Live").await?;
+ let xbox_token=xbox.get("Token").and_then(|x|x.as_str()).ok_or("Xbox Live nie zwrócił tokenu")?;
+ let user_hash=xbox.pointer("/DisplayClaims/xui/0/uhs").and_then(|x|x.as_str()).ok_or("Xbox Live nie zwrócił identyfikatora użytkownika")?;
+ let xsts=auth_json(&c,"https://xsts.auth.xboxlive.com/xsts/authorize",serde_json::json!({"Properties":{"SandboxId":"RETAIL","UserTokens":[xbox_token]},"RelyingParty":"rp://api.minecraftservices.com/","TokenType":"JWT"}),"Xbox Security Token Service").await?;
+ let xsts_token=xsts.get("Token").and_then(|x|x.as_str()).ok_or("Xbox Security Token Service nie zwrócił tokenu")?;
+ let minecraft=auth_json(&c,"https://api.minecraftservices.com/authentication/login_with_xbox",serde_json::json!({"identityToken":format!("XBL3.0 x={user_hash};{xsts_token}")}),"Minecraft").await?;
+ let minecraft_token=minecraft.get("access_token").and_then(|x|x.as_str()).ok_or("Minecraft nie zwrócił tokenu")?;
+ let entitlements=c.get("https://api.minecraftservices.com/entitlements/mcstore").bearer_auth(minecraft_token).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|_|"Nie udało się sprawdzić licencji Minecrafta")?.json::<serde_json::Value>().await.map_err(|e|e.to_string())?;
+ let owns_game=entitlements.get("items").and_then(|x|x.as_array()).map(|items|items.iter().any(|item|matches!(item.get("name").and_then(|x|x.as_str()),Some("game_minecraft"|"product_minecraft")))).unwrap_or(false);
+ if !owns_game{return Err("To konto Microsoft nie ma licencji Minecraft: Java Edition.".into())}
+ let profile_response=c.get("https://api.minecraftservices.com/minecraft/profile").bearer_auth(minecraft_token).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|_|"Konto nie ma dostępnego profilu Minecraft: Java Edition")?.json::<serde_json::Value>().await.map_err(|e|e.to_string())?;
+ let id=profile_response.get("id").and_then(|x|x.as_str()).ok_or("Minecraft nie zwrócił UUID profilu")?.to_owned();
+ let name=profile_response.get("name").and_then(|x|x.as_str()).ok_or("Minecraft nie zwrócił nazwy profilu")?.to_owned();
+ if id.len()!=32||!id.bytes().all(|b|b.is_ascii_hexdigit()){return Err("Minecraft zwrócił nieprawidłowy UUID".into())}
+ save_refresh_token(&id,refresh)?;
+ let account=MinecraftAccount{id,name,client_id:flow.client_id};
+ launcher_core::store::write_json_atomic(&state.paths.root().join("account.json"),&account).map_err(|e|e.to_string())?;
+ *state.device_flow.lock().map_err(|e|e.to_string())?=None;
+ Ok(LoginPollResult{pending:false,retry_after_secs:None,account:Some(account)})
+}
+#[cfg(windows)]
+fn save_refresh_token(account_id:&str,token:&str)->Result<(),String>{
+ keyring::Entry::new("com.xdp32472.vlauncher",account_id).map_err(|e|e.to_string())?.set_password(token).map_err(|e|e.to_string())
+}
+#[cfg(not(windows))]
+fn save_refresh_token(_account_id:&str,_token:&str)->Result<(),String>{
+ Err("Zapisywanie bezpiecznych tokenów jest obecnie dostępne tylko w Windows.".into())
+}
+#[tauri::command]
+fn minecraft_account(state:tauri::State<'_,State>)->Result<Option<MinecraftAccount>,String>{
+ let path=state.paths.root().join("account.json");
+ match fs::read(path){Ok(bytes)=>serde_json::from_slice(&bytes).map(Some).map_err(|e|e.to_string()),Err(e)if e.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(e)=>Err(e.to_string())}
+}
+\n#[tauri::command]fn app_status()->String{"Vlauncher 0.1 · profile and mod management".into()}
 #[tauri::command]fn list_profiles(state:tauri::State<'_,State>)->Result<ProfileResult,String>{let s=read_store(&state)?;let active=state.active.lock().map_err(|e|e.to_string())?.clone().or(s.active_profile_id).or_else(||s.profiles.first().map(|p|p.id.clone()));Ok(ProfileResult{profiles:s.profiles,active_profile_id:active})}
 #[tauri::command]fn create_profile(state:tauri::State<'_,State>,name:String,minecraft_version:String,loader:String)->Result<Profile,String>{let name=name.trim();let v=minecraft_version.trim();let l=loader.to_lowercase();if name.is_empty()||name.len()>48{return Err("Nazwa profilu musi mieć od 1 do 48 znaków".into())}if v.is_empty()||v.len()>32||!v.chars().all(|c|c.is_ascii_alphanumeric()||c=='.'||c=='-'){return Err("Nieprawidłowa wersja Minecrafta".into())}if l!="fabric"&&l!="vanilla"{return Err("Obsługiwane profile: Fabric lub Vanilla".into())}let p=Profile{id:uuid::Uuid::new_v4().simple().to_string(),name:name.into(),minecraft_version:v.into(),loader:l};let mut s=read_store(&state)?;s.profiles.push(p.clone());s.active_profile_id=Some(p.id.clone());write_store(&state,&s)?;*state.active.lock().map_err(|e|e.to_string())?=Some(p.id.clone());fs::create_dir_all(mods_dir(&state,&p)?).map_err(|e|e.to_string())?;Ok(p)}
 #[tauri::command]async fn search_modrinth(query:String,game_version:String,loader:String)->Result<Vec<Hit>,String>{let facets=serde_json::json!([["project_type:mod"],[format!("versions:{game_version}")],[format!("categories:{loader}")]]).to_string();let res=http()?.get(format!("{API}/search")).query(&[("query",query.as_str()),("facets",facets.as_str()),("limit","40")]).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<serde_json::Value>().await.map_err(|e|e.to_string())?;serde_json::from_value(res["hits"].clone()).map_err(|e|e.to_string())}
 #[tauri::command]fn list_installed_mods(state:tauri::State<'_,State>,profile_id:String)->Result<Vec<Installed>,String>{let p=profile(&state,&profile_id)?;let _=mods_dir(&state,&p)?;installed(&state,&p)}
 #[tauri::command]async fn install_mod(state:tauri::State<'_,State>,profile_id:String,project_id:String,minecraft_version:String,loader:String)->Result<Installed,String>{let p=profile(&state,&profile_id)?;if p.loader!="fabric"||loader!="fabric"{return Err("Mody są obecnie dostępne tylko dla profili Fabric".into())}if project_id.len()>64||!project_id.chars().all(|c|c.is_ascii_alphanumeric()||c=='_'||c=='-'){return Err("Nieprawidłowy identyfikator moda".into())}let c=http()?;let versions=c.get(format!("{API}/project/{project_id}/version")).query(&[("game_versions",format!("[\"{minecraft_version}\"]")),("loaders","[\"fabric\"]".to_string())]).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<Vec<Version>>().await.map_err(|e|e.to_string())?;let ver=versions.into_iter().next().ok_or("Brak zgodnej wersji moda")?;if ver.dependencies.iter().any(|x|x.dependency_type=="required"){return Err("Mod wymaga zależności, których instalacja automatyczna jeszcze nie obsługuje.".into())}let f=ver.files.into_iter().find(|x|x.primary).ok_or("Modrinth nie podał głównego pliku")?;if f.size>MAX_MOD_BYTES{return Err("Plik przekracza limit 512 MiB".into())}let u=reqwest::Url::parse(&f.url).map_err(|e|e.to_string())?;if u.scheme()!="https"||u.host_str()!=Some("cdn.modrinth.com"){return Err("Nieoczekiwany serwer pliku".into())}let response=c.get(u).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?;if response.url().scheme()!="https"||response.url().host_str()!=Some("cdn.modrinth.com"){return Err("Nieoczekiwane przekierowanie pliku".into())}let b=response.bytes().await.map_err(|e|e.to_string())?;if b.len()as u64!=f.size{return Err("Rozmiar pliku nie zgadza się z manifestem".into())}let hash=hex::encode(Sha512::digest(&b));if hash!=f.hashes.sha512{return Err("Weryfikacja SHA-512 nie powiodła się".into())}let path=safe_join(&mods_dir(&state,&p)?,&f.filename).map_err(|e|e.to_string())?;fs::write(path,&b).map_err(|e|e.to_string())?;let item=Installed{project_id,file_name:f.filename,sha512:hash};let mut all=installed(&state,&p)?;all.retain(|x|x.project_id!=item.project_id);all.push(item.clone());launcher_core::store::write_json_atomic(&installed_path(&state,&p)?,&all).map_err(|e|e.to_string())?;Ok(item)}
 #[tauri::command]fn remove_mod(state:tauri::State<'_,State>,profile_id:String,project_id:String)->Result<(),String>{let p=profile(&state,&profile_id)?;let mut all=installed(&state,&p)?;if let Some(i)=all.iter().position(|x|x.project_id==project_id){let path=safe_join(&mods_dir(&state,&p)?,&all[i].file_name).map_err(|e|e.to_string())?;if path.exists(){fs::remove_file(path).map_err(|e|e.to_string())?}all.remove(i);}launcher_core::store::write_json_atomic(&installed_path(&state,&p)?,&all).map_err(|e|e.to_string())}
-fn main(){tauri::Builder::default().setup(|app|{let paths=AppPaths::resolve().map_err(|e|std::io::Error::other(e.to_string()))?;paths.ensure_layout().map_err(|e|std::io::Error::other(e.to_string()))?;app.manage(State{paths,active:Mutex::new(None)});Ok(())}).invoke_handler(tauri::generate_handler![app_status,list_profiles,create_profile,search_modrinth,list_installed_mods,install_mod,remove_mod,install_game_client,install_fabric_loader,install_java_runtime]).run(tauri::generate_context!()).expect("failed to run Vlauncher");}
+fn main(){tauri::Builder::default().setup(|app|{let paths=AppPaths::resolve().map_err(|e|std::io::Error::other(e.to_string()))?;paths.ensure_layout().map_err(|e|std::io::Error::other(e.to_string()))?;app.manage(State{paths,active:Mutex::new(None),device_flow:Mutex::new(None)});Ok(())}).invoke_handler(tauri::generate_handler![app_status,list_profiles,create_profile,search_modrinth,list_installed_mods,install_mod,remove_mod,install_game_client,install_fabric_loader,install_java_runtime,start_microsoft_login,poll_microsoft_login,minecraft_account]).run(tauri::generate_context!()).expect("failed to run Vlauncher");}
