@@ -14,12 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: Swatinem/rust-cache@v2
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
       - name: Build Windows MSI
         working-directory: src-tauri
-        run: cargo tauri build --bundles msi
+        run: npx --yes @tauri-apps/cli@2 build --bundles msi
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
