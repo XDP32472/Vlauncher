@@ -4,19 +4,19 @@ Vlauncher is an open-source Minecraft launcher in early development. The goal is
 
 ## Project status
 
-The repository currently contains the MIT license and the v1 FPS comparison protocol. There is no install, launch, mod-management or in-game benchmark implementation yet. Do not treat planned features or example numbers as working functionality.
+The repository contains the MIT license, a v1 FPS comparison protocol, and the first Rust core foundation for user-owned paths and configuration. Installing or launching Minecraft, managing mods, and collecting in-game benchmark data are not implemented yet. Example values in the protocol are placeholders, not measurements.
 
 ## Direction
 
 - Desktop shell: Tauri
-- Launcher core: Rust, kept independent from the desktop shell where practical
+- Launcher core: Rust, independent from the desktop shell where practical
 - User data: stored under the current user's profile; no administrator rights required
 - Mod discovery: Modrinth is the planned first provider
 - Performance: compare repeatable vanilla and optimized profiles using the [FPS benchmark protocol v1](docs/benchmark-protocol-v1.md)
 
 ## Planned milestones
 
-1. Create the Rust workspace and user-data path/configuration foundation.
+1. Build the user-data path and configuration foundation.
 2. Install and launch a vanilla Minecraft instance using user-owned files.
 3. Add Fabric profiles and Modrinth mod discovery, installation and inspection.
 4. Implement benchmark data collection and reports against protocol v1.
@@ -24,7 +24,14 @@ The repository currently contains the MIT license and the v1 FPS comparison prot
 
 ## Development
 
-The Rust workspace and build instructions will be added with the first code milestone. Benchmark measurement is not implemented yet; reports must not display simulated FPS as real results.
+Install the stable Rust toolchain, then from the repository root run:
+
+```sh
+cargo fmt --all -- --check
+cargo check --workspace
+```
+
+Benchmark measurement is not implemented yet; reports must not display simulated FPS as real results.
 
 ## License
 
