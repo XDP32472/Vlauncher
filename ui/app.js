@@ -1,11 +1,12 @@
 
-const state = { profiles: [], active: null, mods: [], query: "", filter: "all" };
+const state = { profiles: [], active: null, mods: [], query: "", filter: "all", account: null };
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 const invoke = (name, args) => window.__TAURI__ && window.__TAURI__.core ? window.__TAURI__.core.invoke(name, args || {}) : Promise.reject("Uruchom aplikację Vlauncher.");
 function toast(text) { const e=$("#toast"); e.textContent=text; e.classList.add("show"); setTimeout(()=>e.classList.remove("show"),2800); }
 function showModal(title, copy) { $("#modal-title").textContent=title; $("#modal-copy").textContent=copy; $("#modal").showModal(); }
 function profile() { return state.profiles.find(p=>p.id===state.active) || state.profiles[0]; }
+function renderAccount() { const badge=$(".profile-banner .pill.neutral"); if(badge)badge.textContent=state.account?"KONTO: "+state.account.name:"GRA NIEPOŁĄCZONA"; }
 function go(view) {
  const labels={home:"PRZEGLĄD",mods:"BIBLIOTEKA MODÓW",profiles:"PROFILE GRY",benchmarks:"BENCHMARKI",settings:"USTAWIENIA"};
  if(!labels[view]) return;
@@ -54,7 +55,7 @@ $("#mods-grid").onclick=async e=>{const b=e.target.closest("[data-mod]");if(!b)r
 $("#play-button").onclick=()=>showModal("Uruchamianie gry w budowie","Instalator plików Minecrafta, Java i logowanie Microsoft są kolejnym etapem.");
 $("#run-benchmark").onclick=()=>showModal("Benchmark w budowie","Protokół pomiaru jest opisany w repozytorium. Zbieranie prawdziwych wyników FPS jeszcze nie działa.");
 $("#java-button").onclick=async()=>{const p=profile(),b=$("#java-button");if(!p){showModal("Brak profilu","Utwórz profil Minecrafta, aby dobrać wersję Java.");return;}b.disabled=true;b.textContent="Pobieranie Javy…";try{const r=await invoke("install_java_runtime",{profileId:p.id});b.textContent="Java "+r.major+" gotowa";b.closest(".runtime-row").querySelector("small").textContent="Java "+r.major+" · runtime zapisany w katalogu użytkownika.";toast("Java "+r.major+" jest gotowa do użycia.");}catch(e){b.disabled=false;b.textContent="Pobierz Javę";showModal("Nie udało się przygotować Java Runtime",String(e));}};
-$("#connect-game").onclick=()=>showModal("Katalog gry","Vlauncher przechowuje osobne pliki gry w katalogu użytkownika; wybór własnej ścieżki pojawi się później.");
+$("#connect-game").onclick=async()=>{const clientId=prompt("Wklej publiczny identyfikator aplikacji Microsoft (GUID):");if(!clientId||!clientId.trim())return;try{const flow=await invoke("start_microsoft_login",{clientId:clientId.trim()});showModal("Zaloguj do Minecrafta","Otwórz stronę "+flow.verificationUri+" i wpisz kod "+flow.userCode+". Nie wpisuj hasła w Vlauncher. Czekam na potwierdzenie…");const poll=async()=>{try{const result=await invoke("poll_microsoft_login");if(result.pending){setTimeout(poll,Math.max(1,result.retryAfterSecs||flow.interval)*1000);return;}state.account=result.account;renderAccount();$("#modal").close();toast("Zalogowano jako "+result.account.name+".");}catch(error){showModal("Logowanie nie powiodło się",String(error));}};setTimeout(poll,flow.interval*1000);}catch(error){showModal("Nie udało się rozpocząć logowania",String(error));}};
 $("#export-report").onclick=()=>showModal("Brak pomiarów","Eksport pojawi się, gdy launcher zarejestruje prawdziwe wyniki FPS.");
-async function init(){try{const d=await invoke("list_profiles");state.profiles=d.profiles||[];state.active=d.activeProfileId||null;renderProfiles();await loadMods();}catch(e){showModal("Silnik launchera niedostępny",String(e));}}
+async function init(){try{state.account=await invoke("minecraft_account");renderAccount();const d=await invoke("list_profiles");state.profiles=d.profiles||[];state.active=d.activeProfileId||null;renderProfiles();await loadMods();}catch(e){showModal("Silnik launchera niedostępny",String(e));}}
 init();
