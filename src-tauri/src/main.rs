@@ -16,7 +16,8 @@ struct DeviceCodeResult { user_code:String, verification_uri:String, expires_in:
 #[derive(Serialize)]
 #[serde(rename_all="camelCase")]
 struct LoginPollResult { pending:bool, retry_after_secs:Option<u64>, account:Option<MinecraftAccount> }
-\nconst API:&str="https://api.modrinth.com/v2";
+
+const API:&str="https://api.modrinth.com/v2";
 const MAX_MOD_BYTES:u64=536870912;
 struct State{paths:AppPaths,active:Mutex<Option<String>>,device_flow:Mutex<Option<DeviceFlow>>}
 #[derive(Clone,Serialize,Deserialize)]
@@ -445,7 +446,8 @@ fn minecraft_account(state:tauri::State<'_,State>)->Result<Option<MinecraftAccou
  let path=state.paths.root().join("account.json");
  match fs::read(path){Ok(bytes)=>serde_json::from_slice(&bytes).map(Some).map_err(|e|e.to_string()),Err(e)if e.kind()==std::io::ErrorKind::NotFound=>Ok(None),Err(e)=>Err(e.to_string())}
 }
-\n#[tauri::command]fn app_status()->String{"Vlauncher 0.1 · profile and mod management".into()}
+
+#[tauri::command]fn app_status()->String{"Vlauncher 0.1 · profile and mod management".into()}
 #[tauri::command]fn list_profiles(state:tauri::State<'_,State>)->Result<ProfileResult,String>{let s=read_store(&state)?;let active=state.active.lock().map_err(|e|e.to_string())?.clone().or(s.active_profile_id).or_else(||s.profiles.first().map(|p|p.id.clone()));Ok(ProfileResult{profiles:s.profiles,active_profile_id:active})}
 #[tauri::command]fn create_profile(state:tauri::State<'_,State>,name:String,minecraft_version:String,loader:String)->Result<Profile,String>{let name=name.trim();let v=minecraft_version.trim();let l=loader.to_lowercase();if name.is_empty()||name.len()>48{return Err("Nazwa profilu musi mieć od 1 do 48 znaków".into())}if v.is_empty()||v.len()>32||!v.chars().all(|c|c.is_ascii_alphanumeric()||c=='.'||c=='-'){return Err("Nieprawidłowa wersja Minecrafta".into())}if l!="fabric"&&l!="vanilla"{return Err("Obsługiwane profile: Fabric lub Vanilla".into())}let p=Profile{id:uuid::Uuid::new_v4().simple().to_string(),name:name.into(),minecraft_version:v.into(),loader:l};let mut s=read_store(&state)?;s.profiles.push(p.clone());s.active_profile_id=Some(p.id.clone());write_store(&state,&s)?;*state.active.lock().map_err(|e|e.to_string())?=Some(p.id.clone());fs::create_dir_all(mods_dir(&state,&p)?).map_err(|e|e.to_string())?;Ok(p)}
 #[tauri::command]async fn search_modrinth(query:String,game_version:String,loader:String)->Result<Vec<Hit>,String>{let facets=serde_json::json!([["project_type:mod"],[format!("versions:{game_version}")],[format!("categories:{loader}")]]).to_string();let res=http()?.get(format!("{API}/search")).query(&[("query",query.as_str()),("facets",facets.as_str()),("limit","40")]).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<serde_json::Value>().await.map_err(|e|e.to_string())?;serde_json::from_value(res["hits"].clone()).map_err(|e|e.to_string())}
