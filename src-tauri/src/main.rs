@@ -1,6 +1,8 @@
-use std::{fs,io::{Cursor,Read},path::PathBuf,sync::Mutex,time::{Duration,Instant}};
+Warning: fs was declared with const; use let for reassignable variables.
+use std::{collections::HashMap,fs,io::{Cursor,Read},path::PathBuf,process::{Command,Stdio},sync::Mutex,time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
 use futures_util::{stream,StreamExt};
 use serde::{Deserialize,Serialize};
+use serde_json::Value;
 use tauri::Manager;
 use sha2::{Digest,Sha256,Sha512};
 use launcher_core::paths::{AppPaths,InstanceId,safe_join};
@@ -75,6 +77,9 @@ struct GameClientResult { version_id:String, size:u64, client_jar:String, librar
 #[derive(Serialize)]
 #[serde(rename_all="camelCase")]
 struct JavaRuntimeResult { major:u64, java_path:String, checksum:String, reused:bool }
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+struct GameLaunchResult { pid:u32, log_file:String }
 #[derive(Deserialize)]
 struct FabricLibrary { name:String, url:String, sha1:String, size:u64 }
 #[derive(Serialize)]
@@ -138,6 +143,136 @@ fn mods_dir(s:&State,p:&Profile)->Result<PathBuf,String>{let d=s.paths.instance_
 fn installed_path(s:&State,p:&Profile)->Result<PathBuf,String>{Ok(s.paths.instance_dir(&id(p)?).join("installed-mods.json"))}
 fn installed(s:&State,p:&Profile)->Result<Vec<Installed>,String>{match fs::read(installed_path(s,p)?){Ok(b)=>serde_json::from_slice(&b).map_err(|e|e.to_string()),Err(e)if e.kind()==std::io::ErrorKind::NotFound=>Ok(vec![]),Err(e)=>Err(e.to_string())}}
 fn http()->Result<reqwest::Client,String>{reqwest::Client::builder().user_agent("Vlauncher/0.1 (github.com/XDP32472/Vlauncher)").timeout(Duration::from_secs(60)).build().map_err(|e|e.to_string())}
+
+fn windows_game_rules_allow(rules:&Value)->bool {
+ let Some(rules)=rules.as_array() else{return true};
+ let mut allowed=false;
+ for rule in rules {
+  let mut matches=true;
+  if let Some(os)=rule.get("os") {
+   if let Some(name)=os.get("name").and_then(Value::as_str){matches &= name=="windows";}
+   if let Some(arch)=os.get("arch").and_then(Value::as_str){matches &= arch=="x86_64"||arch=="amd64";}
+   // Mojang's current Windows libraries do not publish version constraints.
+  }
+  if let Some(features)=rule.get("features").and_then(Value::as_object){
+   matches &= features.values().all(|v|v.as_bool()==Some(false));
+  }
+  if matches {allowed=rule.get("action").and_then(Value::as_str)==Some("allow");}
+ }
+ allowed
+}
+
+fn expand_game_argument(value:&str,vars:&HashMap<String,String>)->Result<String,String>{
+ let mut expanded=value.to_owned();
+ for (key,replacement) in vars {
+  let placeholder=format!("{}{{{}}}",'$',key);
+  expanded=expanded.replace(&placeholder,replacement);
+ }
+ if expanded.contains(&format!("{}{{",'$')){return Err(format!("Nierozpoznany placeholder argumentu Minecrafta: {expanded}"))}
+ Ok(expanded)
+}
+
+fn append_argument_section(metadata:&Value,section:&str,vars:&HashMap<String,String>,out:&mut Vec<String>)->Result<usize,String>{
+ let Some(items)=metadata.pointer(&format!("/arguments/{section}")).and_then(Value::as_array) else{return Ok(0)};
+ let mut count=0;
+ for item in items {
+  let value=if item.is_string(){Some(item)}else if item.get("rules").map(windows_game_rules_allow).unwrap_or(true){item.get("value")}else{None};
+  let Some(value)=value else{continue};
+  let values:Vec<&Value>=if let Some(array)=value.as_array(){array.iter().collect()}else{vec![value]};
+  for arg in values {
+   let Some(arg)=arg.as_str() else{return Err("Metadane gry zawierają argument innego typu niż tekst".into())};
+   out.push(expand_game_argument(arg,vars)?);count+=1;
+  }
+ }
+ Ok(count)
+}
+
+fn add_classpath_library(classpath:&mut Vec<String>,libraries_root:&PathBuf,relative:&str)->Result<(),String>{
+ let path=safe_join(libraries_root,relative).map_err(|e|e.to_string())?;
+ if !path.is_file(){return Err(format!("Brakuje biblioteki {}. Uruchom ponownie instalację klienta.",path.display()))}
+ classpath.push(path.to_string_lossy().into_owned());Ok(())
+}
+
+#[tauri::command]
+async fn launch_game(state:tauri::State<'_,State>,profile_id:String)->Result<GameLaunchResult,String>{
+ let p=profile(&state,&profile_id)?;
+ let account_path=state.paths.root().join("account.json");
+ let account_bytes=fs::read(&account_path).map_err(|_|"Najpierw połącz konto Microsoft z Minecraftem.")?;
+ let account:MinecraftAccount=serde_json::from_slice(&account_bytes).map_err(|e|e.to_string())?;
+ let c=http()?;
+ let (access_token,xuid)=refresh_minecraft_session(&c,&account).await?;
+ let instance=state.paths.instance_dir(&id(&p)?);
+ let game=instance.join("game");
+ let version_dir=safe_join(&game,&format!("versions/{}",p.minecraft_version)).map_err(|e|e.to_string())?;
+ let base_json_path=safe_join(&version_dir,&format!("{}.json",p.minecraft_version)).map_err(|e|e.to_string())?;
+ let base_bytes=fs::read(&base_json_path).map_err(|_|"Najpierw pobierz klienta Minecraft dla tego profilu.")?;
+ let base:Value=serde_json::from_slice(&base_bytes).map_err(|e|format!("Nieprawidłowe metadane Minecrafta: {e}"))?;
+ let client_jar=safe_join(&version_dir,&format!("{}.jar",p.minecraft_version)).map_err(|e|e.to_string())?;
+ if !client_jar.is_file(){return Err("Brakuje pliku klienta Minecrafta. Pobierz klienta ponownie.".into())}
+ let mut fabric:Option<Value>=None;
+ if p.loader=="fabric" {
+  let fabric_id=p.fabric_profile_id.as_deref().ok_or("Najpierw zainstaluj Fabric dla tego profilu.")?;
+  let fabric_dir=safe_join(&game,&format!("versions/{fabric_id}")).map_err(|e|e.to_string())?;
+  let fabric_path=safe_join(&fabric_dir,&format!("{fabric_id}.json")).map_err(|e|e.to_string())?;
+  let bytes=fs::read(&fabric_path).map_err(|_|"Nie znaleziono zainstalowanego profilu Fabric. Zainstaluj Fabric ponownie.")?;
+  let metadata:Value=serde_json::from_slice(&bytes).map_err(|e|format!("Nieprawidłowy profil Fabric: {e}"))?;
+  if metadata.get("inheritsFrom").and_then(Value::as_str)!=Some(p.minecraft_version.as_str()){return Err("Profil Fabric nie pasuje do wybranej wersji Minecrafta.".into())}
+  fabric=Some(metadata);
+ }
+ let mut classpath=vec![client_jar.to_string_lossy().into_owned()];
+ let shared_libraries=state.paths.shared().join("libraries");
+ let parsed:GameVersionInfo=serde_json::from_value(base.clone()).map_err(|e|format!("Nieobsługiwane metadane Minecrafta: {e}"))?;
+ for lib in &parsed.libraries {
+  if !library_allowed(&lib.rules){continue}
+  if let Some(artifact)=lib.downloads.as_ref().and_then(|x|x.artifact.as_ref()) {add_classpath_library(&mut classpath,&shared_libraries,&artifact.path)?;}
+ }
+ if let Some(loader)=&fabric {
+  if let Some(libraries)=loader.get("libraries").and_then(Value::as_array){
+   for lib in libraries {
+    let name=lib.get("name").and_then(Value::as_str).ok_or("Biblioteka Fabric nie ma nazwy")?;
+    add_classpath_library(&mut classpath,&shared_libraries,&fabric_library_path(name)?)?;
+   }
+  }
+ }
+ let java_major=base.pointer("/javaVersion/majorVersion").and_then(Value::as_u64).ok_or("Metadane gry nie określają wersji Java")?;
+ let runtime_root=state.paths.shared().join("runtimes");
+ let mut java_candidates=fs::read_dir(&runtime_root).map_err(|_|"Najpierw pobierz Java Runtime dla tego profilu.")?.filter_map(Result::ok).map(|e|e.path()).filter(|p|p.file_name().and_then(|n|n.to_str()).map(|n|n.starts_with(&format!("temurin-{java_major}-"))).unwrap_or(false)).map(|p|p.join("bin").join("java.exe")).filter(|p|p.is_file()).collect::<Vec<_>>();
+ java_candidates.sort();
+ let java=java_candidates.into_iter().next().ok_or("Najpierw pobierz Java Runtime dla tego profilu.")?;
+ let natives=game.join("natives");
+ fs::create_dir_all(&natives).map_err(|e|e.to_string())?;
+ let mut vars=HashMap::new();
+ let uuid=&account.id;
+ let dashed=if uuid.len()==32&&uuid.bytes().all(|b|b.is_ascii_hexdigit()){format!("{}-{}-{}-{}-{}",&uuid[0..8],&uuid[8..12],&uuid[12..16],&uuid[16..20],&uuid[20..32])}else{return Err("Nieprawidłowy UUID konta Minecraft.".into())};
+ let assets_root=state.paths.shared().join("assets");
+ let asset_index=base.pointer("/assetIndex/id").and_then(Value::as_str).ok_or("Metadane gry nie zawierają indeksu zasobów")?;
+ let version_name=p.fabric_profile_id.clone().unwrap_or_else(||p.minecraft_version.clone());
+ let vars_values=[
+  ("auth_player_name",account.name.clone()),("auth_uuid",dashed),("auth_access_token",access_token.clone()),("auth_session",access_token.clone()),("auth_xuid",xuid),
+  ("user_type","msa".into()),("user_properties","{}".into()),("version_name",version_name),("version_type",base.get("type").and_then(Value::as_str).unwrap_or("release").to_owned()),
+  ("assets_index_name",asset_index.to_owned()),("assets_root",assets_root.to_string_lossy().into_owned()),("game_directory",game.to_string_lossy().into_owned()),("natives_directory",natives.to_string_lossy().into_owned()),
+  ("classpath",classpath.join(";")),("classpath_separator",";".into()),("library_directory",shared_libraries.to_string_lossy().into_owned()),("launcher_name","Vlauncher".into()),("launcher_version","0.1.0".into()),("clientid",account.client_id.clone()),
+  ("resolution_width","854".into()),("resolution_height","480".into()),("quickPlayPath","".into()),("quickPlaySingleplayer","".into()),("quickPlayMultiplayer","".into()),("quickPlayRealms","".into()),
+ ].into_iter().map(|(key,value)|(key.to_owned(),value)).collect::<HashMap<_,_>>();
+ let mut jvm=Vec::new();
+ let jvm_count=append_argument_section(&base,"jvm",&vars_values,&mut jvm)?;
+ if jvm_count==0{return Err("Ta wersja Minecrafta nie obsługuje aktualnego formatu argumentów launchera.".into())}
+ if let Some(loader)=&fabric{append_argument_section(loader,"jvm",&vars_values,&mut jvm)?;}
+ if !jvm.iter().any(|x|x.starts_with("-Xmx")){jvm.push("-Xmx2G".into());}
+ let mut game_args=Vec::new();
+ if append_argument_section(&base,"game",&vars_values,&mut game_args)?==0{return Err("Metadane gry nie zawierają argumentów uruchomienia.".into())}
+ if let Some(loader)=&fabric{append_argument_section(loader,"game",&vars_values,&mut game_args)?;}
+ let main_class=fabric.as_ref().and_then(|x|x.get("mainClass")).or_else(||base.get("mainClass")).and_then(Value::as_str).ok_or("Metadane gry nie zawierają klasy startowej")?;
+ let mut args=Vec::with_capacity(jvm.len()+game_args.len()+1);
+ args.extend(jvm);args.push(main_class.to_owned());args.extend(game_args);
+ let logs=state.paths.logs().join("game");fs::create_dir_all(&logs).map_err(|e|e.to_string())?;
+ let stamp=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+ let log_file=logs.join(format!("{}-{stamp}.log",p.id));
+ let stdout=fs::File::create(&log_file).map_err(|e|e.to_string())?;
+ let stderr=stdout.try_clone().map_err(|e|e.to_string())?;
+ let child=Command::new(&java).args(&args).current_dir(&game).stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr)).spawn().map_err(|e|format!("Nie udało się uruchomić Java: {e}"))?;
+ Ok(GameLaunchResult{pid:child.id(),log_file:log_file.to_string_lossy().into_owned()})
+}
 
 #[tauri::command]
 async fn install_game_client(state:tauri::State<'_,State>,profile_id:String)->Result<GameClientResult,String>{
@@ -367,6 +502,33 @@ async fn auth_json(c:&reqwest::Client,url:&str,payload:serde_json::Value,label:&
  if !status.is_success(){return Err(format!("{label}: serwer odrzucił żądanie (HTTP {})",status.as_u16()))}
  Ok(body)
 }
+#[cfg(windows)]
+fn load_refresh_token(account_id:&str)->Result<String,String>{
+ keyring::Entry::new("com.xdp32472.vlauncher",account_id).map_err(|e|e.to_string())?.get_password().map_err(|_|"Brakuje bezpiecznego tokenu logowania. Połącz ponownie konto Microsoft.".into())
+}
+#[cfg(not(windows))]
+fn load_refresh_token(_account_id:&str)->Result<String,String>{Err("Logowanie dostępne jest obecnie tylko w Windows.".into())}
+
+async fn refresh_minecraft_session(c:&reqwest::Client,account:&MinecraftAccount)->Result<(String,String),String>{
+ let refresh=load_refresh_token(&account.id)?;
+ let response=c.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
+  .form(&[("grant_type","refresh_token"),("client_id",account.client_id.as_str()),("refresh_token",refresh.as_str()),("scope","XboxLive.signin offline_access")])
+  .send().await.map_err(|e|e.to_string())?;
+ let status=response.status();
+ let token=response.json::<Value>().await.map_err(|_|"Microsoft zwrócił nieprawidłową odpowiedź logowania".to_string())?;
+ if !status.is_success(){return Err(token.get("error_description").and_then(Value::as_str).unwrap_or("Nie udało się odświeżyć logowania Microsoft").to_owned())}
+ let ms_access=token.get("access_token").and_then(Value::as_str).ok_or("Microsoft nie zwrócił tokenu dostępu")?;
+ if let Some(rotated)=token.get("refresh_token").and_then(Value::as_str){save_refresh_token(&account.id,rotated)?;}
+ let xbox=auth_json(c,"https://user.auth.xboxlive.com/user/authenticate",serde_json::json!({"Properties":{"AuthMethod":"RPS","SiteName":"user.auth.xboxlive.com","RpsTicket":format!("d={ms_access}")},"RelyingParty":"http://auth.xboxlive.com","TokenType":"JWT"}),"Xbox Live").await?;
+ let xbox_token=xbox.get("Token").and_then(Value::as_str).ok_or("Xbox Live nie zwrócił tokenu")?;
+ let xsts=auth_json(c,"https://xsts.auth.xboxlive.com/xsts/authorize",serde_json::json!({"Properties":{"SandboxId":"RETAIL","UserTokens":[xbox_token]},"RelyingParty":"rp://api.minecraftservices.com/","TokenType":"JWT"}),"Xbox Security Token Service").await?;
+ let xsts_token=xsts.get("Token").and_then(Value::as_str).ok_or("Xbox Security Token Service nie zwrócił tokenu")?;
+ let user_hash=xsts.pointer("/DisplayClaims/xui/0/uhs").and_then(Value::as_str).ok_or("Xbox nie zwrócił identyfikatora użytkownika")?;
+ let xuid=xsts.pointer("/DisplayClaims/xui/0/xid").and_then(Value::as_str).unwrap_or("").to_owned();
+ let minecraft=auth_json(c,"https://api.minecraftservices.com/authentication/login_with_xbox",serde_json::json!({"identityToken":format!("XBL3.0 x={user_hash};{xsts_token}")}),"Minecraft").await?;
+ let minecraft_token=minecraft.get("access_token").and_then(Value::as_str).ok_or("Minecraft nie zwrócił tokenu dostępu")?.to_owned();
+ Ok((minecraft_token,xuid))
+}
 #[tauri::command]
 async fn start_microsoft_login(state:tauri::State<'_,State>,client_id:String)->Result<DeviceCodeResult,String>{
  let client_id=client_id.trim().to_owned();
@@ -458,4 +620,4 @@ fn minecraft_account(state:tauri::State<'_,State>)->Result<Option<MinecraftAccou
 #[tauri::command]fn list_installed_mods(state:tauri::State<'_,State>,profile_id:String)->Result<Vec<Installed>,String>{let p=profile(&state,&profile_id)?;let _=mods_dir(&state,&p)?;installed(&state,&p)}
 #[tauri::command]async fn install_mod(state:tauri::State<'_,State>,profile_id:String,project_id:String,minecraft_version:String,loader:String)->Result<Installed,String>{let p=profile(&state,&profile_id)?;if p.loader!="fabric"||loader!="fabric"{return Err("Mody są obecnie dostępne tylko dla profili Fabric".into())}if project_id.len()>64||!project_id.chars().all(|c|c.is_ascii_alphanumeric()||c=='_'||c=='-'){return Err("Nieprawidłowy identyfikator moda".into())}let c=http()?;let versions=c.get(format!("{API}/project/{project_id}/version")).query(&[("game_versions",format!("[\"{minecraft_version}\"]")),("loaders","[\"fabric\"]".to_string())]).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<Vec<Version>>().await.map_err(|e|e.to_string())?;let ver=versions.into_iter().next().ok_or("Brak zgodnej wersji moda")?;if ver.dependencies.iter().any(|x|x.dependency_type=="required"){return Err("Mod wymaga zależności, których instalacja automatyczna jeszcze nie obsługuje.".into())}let f=ver.files.into_iter().find(|x|x.primary).ok_or("Modrinth nie podał głównego pliku")?;if f.size>MAX_MOD_BYTES{return Err("Plik przekracza limit 512 MiB".into())}let u=reqwest::Url::parse(&f.url).map_err(|e|e.to_string())?;if u.scheme()!="https"||u.host_str()!=Some("cdn.modrinth.com"){return Err("Nieoczekiwany serwer pliku".into())}let response=c.get(u).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?;if response.url().scheme()!="https"||response.url().host_str()!=Some("cdn.modrinth.com"){return Err("Nieoczekiwane przekierowanie pliku".into())}let b=response.bytes().await.map_err(|e|e.to_string())?;if b.len()as u64!=f.size{return Err("Rozmiar pliku nie zgadza się z manifestem".into())}let hash=hex::encode(Sha512::digest(&b));if hash!=f.hashes.sha512{return Err("Weryfikacja SHA-512 nie powiodła się".into())}let path=safe_join(&mods_dir(&state,&p)?,&f.filename).map_err(|e|e.to_string())?;fs::write(path,&b).map_err(|e|e.to_string())?;let item=Installed{project_id,file_name:f.filename,sha512:hash};let mut all=installed(&state,&p)?;all.retain(|x|x.project_id!=item.project_id);all.push(item.clone());launcher_core::store::write_json_atomic(&installed_path(&state,&p)?,&all).map_err(|e|e.to_string())?;Ok(item)}
 #[tauri::command]fn remove_mod(state:tauri::State<'_,State>,profile_id:String,project_id:String)->Result<(),String>{let p=profile(&state,&profile_id)?;let mut all=installed(&state,&p)?;if let Some(i)=all.iter().position(|x|x.project_id==project_id){let path=safe_join(&mods_dir(&state,&p)?,&all[i].file_name).map_err(|e|e.to_string())?;if path.exists(){fs::remove_file(path).map_err(|e|e.to_string())?}all.remove(i);}launcher_core::store::write_json_atomic(&installed_path(&state,&p)?,&all).map_err(|e|e.to_string())}
-fn main(){tauri::Builder::default().setup(|app|{let paths=AppPaths::resolve().map_err(|e|std::io::Error::other(e.to_string()))?;paths.ensure_layout().map_err(|e|std::io::Error::other(e.to_string()))?;app.manage(State{paths,active:Mutex::new(None),device_flow:Mutex::new(None)});Ok(())}).invoke_handler(tauri::generate_handler![app_status,list_profiles,create_profile,search_modrinth,list_installed_mods,install_mod,remove_mod,install_game_client,install_fabric_loader,install_java_runtime,start_microsoft_login,poll_microsoft_login,minecraft_account]).run(tauri::generate_context!()).expect("failed to run Vlauncher");}
+ fn main(){tauri::Builder::default().setup(|app|{let paths=AppPaths::resolve().map_err(|e|std::io::Error::other(e.to_string()))?;paths.ensure_layout().map_err(|e|std::io::Error::other(e.to_string()))?;app.manage(State{paths,active:Mutex::new(None),device_flow:Mutex::new(None)});Ok(())}).invoke_handler(tauri::generate_handler![app_status,list_profiles,create_profile,search_modrinth,list_installed_mods,install_mod,remove_mod,install_game_client,install_fabric_loader,install_java_runtime,launch_game,start_microsoft_login,poll_microsoft_login,minecraft_account]).run(tauri::generate_context!()).expect("failed to run Vlauncher");}
