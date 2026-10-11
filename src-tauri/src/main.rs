@@ -2,7 +2,7 @@ use std::{fs,io::{Cursor,Read},path::PathBuf,sync::Mutex,time::Duration};
 use futures_util::{stream,StreamExt};
 use serde::{Deserialize,Serialize};
 use tauri::Manager;
-use sha2::{Digest,Sha512};
+use sha2::{Digest,Sha256,Sha512};
 use launcher_core::paths::{AppPaths,InstanceId,safe_join};
 const API:&str="https://api.modrinth.com/v2";
 const MAX_MOD_BYTES:u64=536870912;
@@ -59,6 +59,9 @@ struct GameOs { name:Option<String>, arch:Option<String> }
 #[derive(Serialize)]
 #[serde(rename_all="camelCase")]
 struct GameClientResult { version_id:String, size:u64, client_jar:String, libraries:u32, assets:u32 }
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+struct JavaRuntimeResult { major:u64, java_path:String, checksum:String, reused:bool }
 #[derive(Deserialize)]
 struct FabricLibrary { name:String, url:String, sha1:String, size:u64 }
 #[derive(Serialize)]
@@ -194,6 +197,82 @@ async fn install_game_client(state:tauri::State<'_,State>,profile_id:String)->Re
 
 
 
+
+#[tauri::command]
+async fn install_java_runtime(state:tauri::State<'_,State>,profile_id:String)->Result<JavaRuntimeResult,String>{
+ let p=profile(&state,&profile_id)?;
+ let c=http()?;
+ let manifest=c.get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json").send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<GameManifest>().await.map_err(|e|e.to_string())?;
+ let entry=manifest.versions.into_iter().find(|v|v.id==p.minecraft_version).ok_or("Nie znaleziono tej wersji w manifeście Mojang")?;
+ let meta=c.get(valid_mojang_url(&entry.url)?).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?;
+ let _=valid_mojang_url(meta.url().as_str())?;
+ let meta_bytes=meta.bytes().await.map_err(|e|e.to_string())?;
+ if !hex::encode(sha1::Sha1::digest(&meta_bytes)).eq_ignore_ascii_case(&entry.sha1){return Err("Weryfikacja metadanych Minecrafta nie powiodła się".into())}
+ let info:serde_json::Value=serde_json::from_slice(&meta_bytes).map_err(|e|e.to_string())?;
+ let major=info.pointer("/javaVersion/majorVersion").and_then(|x|x.as_u64()).ok_or("Metadane Minecrafta nie określają wymaganej wersji Java")?;
+ if !(8..=99).contains(&major){return Err("Wersja Java wymagana przez Minecrafta jest nieobsługiwana".into())}
+ let api=format!("https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture=x64&image_type=jre&os=windows&vendor=eclipse");
+ let assets=c.get(api).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<Vec<serde_json::Value>>().await.map_err(|e|e.to_string())?;
+ let release=assets.first().ok_or("Adoptium nie udostępnia pasującego runtime Java")?;
+ let binary=release.get("binary").ok_or("Brak informacji o wydaniu Java")?;
+ if binary.get("architecture").and_then(|x|x.as_str())!=Some("x64")||binary.get("os").and_then(|x|x.as_str())!=Some("windows")||binary.get("image_type").and_then(|x|x.as_str())!=Some("jre")||binary.get("jvm_impl").and_then(|x|x.as_str())!=Some("hotspot"){
+  return Err("Adoptium zwróciło niezgodny runtime Java".into())
+ }
+ let package=binary.get("package").ok_or("Brak paczki runtime Java")?;
+ let checksum=package.get("checksum").and_then(|x|x.as_str()).ok_or("Brak sumy SHA-256 runtime Java")?.to_ascii_lowercase();
+ if checksum.len()!=64||!checksum.bytes().all(|b|b.is_ascii_hexdigit()){return Err("Nieprawidłowa suma SHA-256 runtime Java".into())}
+ let size=package.get("size").and_then(|x|x.as_u64()).ok_or("Brak rozmiaru runtime Java")?;
+ if size>536870912{return Err("Paczka runtime Java przekracza limit 512 MiB".into())}
+ let download=package.get("link").and_then(|x|x.as_str()).ok_or("Brak adresu runtime Java")?;
+ let url=reqwest::Url::parse(download).map_err(|e|e.to_string())?;
+ if url.scheme()!="https"||url.host_str()!=Some("github.com"){return Err("Nieoczekiwany serwer runtime Java".into())}
+ let response=c.get(url).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?;
+ if response.url().scheme()!="https"||!matches!(response.url().host_str(),Some("github.com"|"release-assets.githubusercontent.com"|"objects.githubusercontent.com")){
+  return Err("Nieoczekiwane przekierowanie runtime Java".into())
+ }
+ let bytes=response.bytes().await.map_err(|e|e.to_string())?;
+ if bytes.len()as u64!=size||hex::encode(Sha256::digest(&bytes))!=checksum{return Err("Weryfikacja SHA-256 runtime Java nie powiodła się".into())}
+ let root=state.paths.shared().join("runtimes");
+ fs::create_dir_all(&root).map_err(|e|e.to_string())?;
+ let runtime_name=format!("temurin-{major}-{}",&checksum[..12]);
+ let target=root.join(&runtime_name);
+ let java_path=target.join("bin").join("java.exe");
+ if java_path.is_file(){
+  let marker=target.join(".vlauncher-runtime.json");
+  if let Ok(data)=fs::read(&marker){if let Ok(saved)=serde_json::from_slice::<serde_json::Value>(&data){
+   if saved.get("checksum").and_then(|x|x.as_str())==Some(checksum.as_str()){return Ok(JavaRuntimeResult{major,java_path:java_path.to_string_lossy().into_owned(),checksum,reused:true})}
+  }}
+  return Err("Istnieje runtime Java bez zgodnego znacznika Vlauncher; wybierz inny katalog danych".into())
+ }
+ let staging=root.join(format!(".{runtime_name}-staging-{}",uuid::Uuid::new_v4().simple()));
+ fs::create_dir_all(&staging).map_err(|e|e.to_string())?;
+ let mut archive=zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e|e.to_string())?;
+ if archive.len()>50000{return Err("Paczka Java zawiera zbyt wiele plików".into())}
+ let mut expanded=0u64;
+ for i in 0..archive.len(){
+  let mut file=archive.by_index(i).map_err(|e|e.to_string())?;
+  if file.unix_mode().is_some_and(|mode|mode&0o170000==0o120000){return Err("Paczka Java zawiera dowiązanie symboliczne".into())}
+  expanded=expanded.saturating_add(file.size());
+  if expanded>1073741824{return Err("Rozpakowana paczka Java przekracza limit 1 GiB".into())}
+  let Some(relative)=file.enclosed_name() else{continue};
+  let mut components=relative.components();
+  let Some(first)=components.next() else{continue};
+  let Some(child)=relative.strip_prefix(first.as_os_str()).ok() else{continue};
+  if child.as_os_str().is_empty(){continue}
+  let child=child.to_string_lossy().replace('\\',"/");
+  let output=safe_join(&staging,&child).map_err(|e|e.to_string())?;
+  if file.is_dir(){fs::create_dir_all(output).map_err(|e|e.to_string())?;continue}
+  if let Some(parent)=output.parent(){fs::create_dir_all(parent).map_err(|e|e.to_string())?}
+  let mut out=fs::File::create(output).map_err(|e|e.to_string())?;
+  std::io::copy(&mut file,&mut out).map_err(|e|e.to_string())?;
+ }
+ let staged_java=staging.join("bin").join("java.exe");
+ if !staged_java.is_file(){return Err("Nie znaleziono java.exe w paczce runtime".into())}
+ fs::write(staging.join(".vlauncher-runtime.json"),serde_json::to_vec(&serde_json::json!({"major":major,"checksum":checksum,"vendor":"Eclipse Temurin"})).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+ fs::rename(&staging,&target).map_err(|e|e.to_string())?;
+ Ok(JavaRuntimeResult{major,java_path:java_path.to_string_lossy().into_owned(),checksum,reused:false})
+}
+
 fn fabric_library_path(coordinate:&str)->Result<String,String>{
  let parts:Vec<_>=coordinate.split(':').collect();
  if !(3..=4).contains(&parts.len()){return Err("Nieprawidłowe współrzędne biblioteki Fabric".into())}
@@ -270,4 +349,4 @@ async fn install_fabric_loader(state:tauri::State<'_,State>,profile_id:String)->
 #[tauri::command]fn list_installed_mods(state:tauri::State<'_,State>,profile_id:String)->Result<Vec<Installed>,String>{let p=profile(&state,&profile_id)?;let _=mods_dir(&state,&p)?;installed(&state,&p)}
 #[tauri::command]async fn install_mod(state:tauri::State<'_,State>,profile_id:String,project_id:String,minecraft_version:String,loader:String)->Result<Installed,String>{let p=profile(&state,&profile_id)?;if p.loader!="fabric"||loader!="fabric"{return Err("Mody są obecnie dostępne tylko dla profili Fabric".into())}if project_id.len()>64||!project_id.chars().all(|c|c.is_ascii_alphanumeric()||c=='_'||c=='-'){return Err("Nieprawidłowy identyfikator moda".into())}let c=http()?;let versions=c.get(format!("{API}/project/{project_id}/version")).query(&[("game_versions",format!("[\"{minecraft_version}\"]")),("loaders","[\"fabric\"]".to_string())]).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json::<Vec<Version>>().await.map_err(|e|e.to_string())?;let ver=versions.into_iter().next().ok_or("Brak zgodnej wersji moda")?;if ver.dependencies.iter().any(|x|x.dependency_type=="required"){return Err("Mod wymaga zależności, których instalacja automatyczna jeszcze nie obsługuje.".into())}let f=ver.files.into_iter().find(|x|x.primary).ok_or("Modrinth nie podał głównego pliku")?;if f.size>MAX_MOD_BYTES{return Err("Plik przekracza limit 512 MiB".into())}let u=reqwest::Url::parse(&f.url).map_err(|e|e.to_string())?;if u.scheme()!="https"||u.host_str()!=Some("cdn.modrinth.com"){return Err("Nieoczekiwany serwer pliku".into())}let response=c.get(u).send().await.map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?;if response.url().scheme()!="https"||response.url().host_str()!=Some("cdn.modrinth.com"){return Err("Nieoczekiwane przekierowanie pliku".into())}let b=response.bytes().await.map_err(|e|e.to_string())?;if b.len()as u64!=f.size{return Err("Rozmiar pliku nie zgadza się z manifestem".into())}let hash=hex::encode(Sha512::digest(&b));if hash!=f.hashes.sha512{return Err("Weryfikacja SHA-512 nie powiodła się".into())}let path=safe_join(&mods_dir(&state,&p)?,&f.filename).map_err(|e|e.to_string())?;fs::write(path,&b).map_err(|e|e.to_string())?;let item=Installed{project_id,file_name:f.filename,sha512:hash};let mut all=installed(&state,&p)?;all.retain(|x|x.project_id!=item.project_id);all.push(item.clone());launcher_core::store::write_json_atomic(&installed_path(&state,&p)?,&all).map_err(|e|e.to_string())?;Ok(item)}
 #[tauri::command]fn remove_mod(state:tauri::State<'_,State>,profile_id:String,project_id:String)->Result<(),String>{let p=profile(&state,&profile_id)?;let mut all=installed(&state,&p)?;if let Some(i)=all.iter().position(|x|x.project_id==project_id){let path=safe_join(&mods_dir(&state,&p)?,&all[i].file_name).map_err(|e|e.to_string())?;if path.exists(){fs::remove_file(path).map_err(|e|e.to_string())?}all.remove(i);}launcher_core::store::write_json_atomic(&installed_path(&state,&p)?,&all).map_err(|e|e.to_string())}
-fn main(){tauri::Builder::default().setup(|app|{let paths=AppPaths::resolve().map_err(|e|std::io::Error::other(e.to_string()))?;paths.ensure_layout().map_err(|e|std::io::Error::other(e.to_string()))?;app.manage(State{paths,active:Mutex::new(None)});Ok(())}).invoke_handler(tauri::generate_handler![app_status,list_profiles,create_profile,search_modrinth,list_installed_mods,install_mod,remove_mod,install_game_client,install_fabric_loader]).run(tauri::generate_context!()).expect("failed to run Vlauncher");}
+fn main(){tauri::Builder::default().setup(|app|{let paths=AppPaths::resolve().map_err(|e|std::io::Error::other(e.to_string()))?;paths.ensure_layout().map_err(|e|std::io::Error::other(e.to_string()))?;app.manage(State{paths,active:Mutex::new(None)});Ok(())}).invoke_handler(tauri::generate_handler![app_status,list_profiles,create_profile,search_modrinth,list_installed_mods,install_mod,remove_mod,install_game_client,install_fabric_loader,install_java_runtime]).run(tauri::generate_context!()).expect("failed to run Vlauncher");}
