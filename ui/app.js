@@ -1,4 +1,3 @@
-Warning: fs was declared with const; use let for reassignable variables.
 
 const state = { profiles: [], active: null, mods: [], query: "", filter: "all", account: null };
 const $ = (s) => document.querySelector(s);
