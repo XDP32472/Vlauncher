@@ -104,7 +104,8 @@ fn extract_native_jar(bytes:Vec<u8>,destination:&PathBuf)->Result<(),String>{
  }
  Ok(())
 }
-\nfn id(p:&Profile)->Result<InstanceId,String>{InstanceId::parse(p.id.clone()).map_err(|e|e.to_string())}
+
+fn id(p:&Profile)->Result<InstanceId,String>{InstanceId::parse(p.id.clone()).map_err(|e|e.to_string())}
 fn store_path(s:&State)->PathBuf{s.paths.root().join("profiles.json")}
 fn read_store(s:&State)->Result<Store,String>{match fs::read(store_path(s)){Ok(b)=>serde_json::from_slice(&b).map_err(|e|e.to_string()),Err(e)if e.kind()==std::io::ErrorKind::NotFound=>Ok(Store{profiles:vec![],active_profile_id:None}),Err(e)=>Err(e.to_string())}}
 fn write_store(s:&State,x:&Store)->Result<(),String>{launcher_core::store::write_json_atomic(&store_path(s),x).map_err(|e|e.to_string())}
@@ -163,7 +164,8 @@ async fn install_game_client(state:tauri::State<'_,State>,profile_id:String)->Re
  fs::create_dir_all(&index_root).map_err(|e|e.to_string())?;
  fs::write(index_root.join(format!("{}.json",info.asset_index.id)),&index_bytes).map_err(|e|e.to_string())?;
  let objects_root=shared.join("assets").join("objects");
- let mut downloads=stream::iter(index.objects.into_iter().map(|(_,object)|{
+ let asset_count=index.objects.len() as u32;
+ let downloads=stream::iter(index.objects.into_iter().map(|(_,object)|{
   let client=c.clone();let root=objects_root.clone();
   async move {
    if object.hash.len()!=40{return Err("Nieprawidłowy hash zasobu Mojang".to_string())}
@@ -179,5 +181,5 @@ async fn install_game_client(state:tauri::State<'_,State>,profile_id:String)->Re
   }
  })).buffer_unordered(12).collect::<Vec<Result<(),String>>>().await;
  for result in downloads.drain(..){result?}
- Ok(GameClientResult{version_id:p.minecraft_version,size:jar.len() as u64,client_jar:client_path.to_string_lossy().into_owned(),libraries:library_count,assets:index.objects.len() as u32})
+ Ok(GameClientResult{version_id:p.minecraft_version,size:jar.len() as u64,client_jar:client_path.to_string_lossy().into_owned(),libraries:library_count,assets:asset_count})
 }
