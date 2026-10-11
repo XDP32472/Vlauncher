@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Vlauncher",
+  "version": "0.1.0",
+  "identifier": "com.xdp32472.vlauncher",
+  "build": { "frontendDist": "../ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      { "title": "Vlauncher", "width": 1440, "height": 960, "minWidth": 900, "minHeight": 640 }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: https://cdn.modrinth.com data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost https://api.modrinth.com https://cdn.modrinth.com"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["icons/icon.ico"],
+    "targets": "all",
+    "category": "Game",
+    "shortDescription": "Launcher Minecraft skupiony na wydajności",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

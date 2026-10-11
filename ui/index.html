@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#10110f" />
+    <title>Vlauncher — Minecraft performance launcher</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#home" aria-label="Vlauncher start">
+          <span class="brand-mark"><i></i><i></i><i></i><i></i></span>
+          <span>vlauncher<span class="brand-dot">.</span></span>
+          <span class="brand-tag">BETA</span>
+        </a>
+        <div class="side-label">WORKSPACE</div>
+        <nav class="main-nav" aria-label="Główna nawigacja">
+          <button class="nav-item active" data-view="home"><span class="nav-icon">◫</span> Przegląd <span class="nav-key">01</span></button>
+          <button class="nav-item" data-view="mods"><span class="nav-icon">⧉</span> Biblioteka modów <span class="nav-count" id="nav-mod-count">00</span></button>
+          <button class="nav-item" data-view="profiles"><span class="nav-icon">◈</span> Profile gry</button>
+          <button class="nav-item" data-view="benchmarks"><span class="nav-icon">⌁</span> Benchmarki</button>
+        </nav>
+        <div class="side-bottom">
+          <div class="system-card">
+            <div class="system-top"><span class="live-dot"></span> SYSTEM GOTOWY <span class="system-more">···</span></div>
+            <div class="system-row"><span>Java Runtime</span><b>Nie wykryto</b></div>
+            <div class="system-row"><span>Instalacja gry</span><b>Niepołączona</b></div>
+            <button class="text-button" data-view="settings">Konfiguruj urządzenie <span>↗</span></button>
+          </div>
+          <button class="user-row"><span class="avatar">V</span><span><b>Gracz</b><small>Profil lokalny</small></span><span class="dots">···</span></button>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumbs"><span>VANTA</span><b>/</b><span id="crumb-current">PRZEGLĄD</span></div>
+          <div class="top-actions"><span class="build-tag"><span class="live-dot"></span> LOKALNA SESJA</span><button class="icon-button" aria-label="Powiadomienia">♧<i></i></button><span class="avatar small">G</span></div>
+        </header>
+
+        <section class="view active-view" id="view-home">
+          <div class="hero-grid">
+            <div class="hero-copy">
+              <div class="eyebrow"><span class="eyebrow-line"></span> TWOJA GRA, TWOJE FPS</div>
+              <h1>Więcej klatek.<br /><span>Mniej tarcia.</span></h1>
+              <p>Jedno miejsce na profile, mody i pomiary. Przygotuj świat do gry i zobacz, co naprawdę daje wydajność.</p>
+              <div class="hero-buttons"><button class="button button-primary" id="play-button" disabled><span class="play-icon">▶</span> Uruchom Minecrafta</button><button class="button button-quiet" data-view="profiles">Ustaw profil <span>↗</span></button></div>
+              <div class="hero-footnote"><span class="status-ring"></span> Gotowy do konfiguracji <span class="foot-sep">·</span> 0 połączonych instalacji</div>
+            </div>
+            <div class="hero-art" aria-label="Grafika abstrakcyjnego krajobrazu blokowego">
+              <div class="art-scan"></div><div class="art-sun"></div><div class="art-mountain mountain-back"></div><div class="art-mountain mountain-front"></div>
+              <div class="art-grid"></div><div class="art-label">RENDER / 001<br /><span>PERFORMANCE WORLD</span></div><div class="art-cross">+</div>
+              <div class="art-caption">01 — FIELD STUDY</div>
+            </div>
+          </div>
+
+          <div class="section-heading"><div><span class="eyebrow muted">SZYBKI PODGLĄD</span><h2>Twój setup</h2></div><button class="link-button" data-view="profiles">Zobacz profile <span>↗</span></button></div>
+          <div class="stat-grid">
+            <article class="stat-card"><div class="stat-top"><span>AKTYWNY PROFIL</span><span class="stat-symbol">◈</span></div><div class="stat-value" id="active-profile-label">Brak profilu</div><div class="stat-meta"><span class="pill neutral">NIEURUCHOMIONY</span><span>—</span></div></article>
+            <article class="stat-card"><div class="stat-top"><span>ZAINSTALOWANE MODY</span><span class="stat-symbol">⧉</span></div><div class="stat-value"><span id="installed-count">0</span><small> / 8</small></div><div class="stat-meta"><span class="tiny-dot"></span><span>Brak zainstalowanych modów</span></div></article>
+            <article class="stat-card"><div class="stat-top"><span>OSTATNI POMIAR</span><span class="stat-symbol">⌁</span></div><div class="stat-value">— <small>FPS</small></div><div class="stat-meta"><span>Uruchom benchmark, aby zacząć</span></div></article>
+            <article class="stat-card stat-highlight"><div class="stat-top"><span>CEL WYDAJNOŚCI</span><span class="stat-symbol">↗</span></div><div class="stat-value">+5<small>%</small></div><div class="stat-meta"><span>proponowany próg poprawy mediany FPS</span></div></article>
+          </div>
+
+          <div class="lower-grid">
+            <section class="panel mod-preview"><div class="panel-heading"><div><span class="eyebrow muted">TWOJA KONFIGURACJA</span><h3>Aktywne mody</h3></div><button class="icon-link" data-view="mods">Wszystkie <span>↗</span></button></div><div class="mod-list" id="home-mod-list"></div></section>
+            <section class="panel benchmark-preview"><div class="panel-heading"><div><span class="eyebrow muted">POWTARZALNE POMIARY</span><h3>Benchmark FPS</h3></div><span class="panel-icon">⌁</span></div><p>Porównuj ten sam świat i ustawienia. Rejestruj medianę FPS, 1% low oraz czas klatki.</p><div class="bench-mini"><div><b>03</b><span>PRZEBIEGI</span></div><div><b>180<span>s</span></b><span>POMIAR</span></div><div><b>60<span>s</span></b><span>ROZGRZEWKA</span></div></div><button class="button button-outline full-width" data-view="benchmarks">Zobacz protokół <span>→</span></button></section>
+          </div>
+          <footer class="footer-note"><span>VLAUNCHER / OPEN SOURCE PROJECT.</span><span>NOT AFFILIATED WITH MOJANG OR MICROSOFT.</span></footer>
+        </section>
+
+        <section class="view" id="view-mods">
+          <div class="page-title-row"><div><div class="eyebrow"><span class="eyebrow-line"></span> TWOJA BIBLIOTEKA</div><h1>Mod <span>control.</span></h1><p>Przejrzyj aktywne mody i przygotuj zestaw pod płynną rozgrywkę.</p></div><button class="button button-primary" id="discover-button">＋ Odkryj mody</button></div>
+          <div class="toolbar"><div class="filter-tabs"><button class="filter-tab selected" data-filter="all">Wszystkie <span id="all-mod-count">8</span></button><button class="filter-tab" data-filter="installed">Zainstalowane <span id="installed-tab-count">4</span></button><button class="filter-tab" data-filter="performance">Wydajność</button></div><label class="search-box"><span>⌕</span><input id="mod-search" type="search" placeholder="Szukaj modów…" /><kbd>Ctrl K</kbd></label></div>
+          <div class="compat-banner"><span class="compat-icon">i</span><div><b>Profil: Fabric · Minecraft 1.21.4</b><small>Instalowanie będzie dostępne po połączeniu instalacji gry. Ten podgląd zapisuje wybory lokalnie.</small></div><button data-view="profiles">Zmień profil ↗</button></div>
+          <div class="mods-grid" id="mods-grid"></div>
+          <footer class="footer-note"><span>MODRINTH / KATALOG MODÓW</span><span>WYŚWIETLANE DANE POCHODZĄ Z API MODRINTH.</span></footer>
+        </section>
+
+        <section class="view" id="view-profiles">
+          <div class="page-title-row"><div><div class="eyebrow"><span class="eyebrow-line"></span> ODDZIELNE INSTALACJE</div><h1>Profile <span>gry.</span></h1><p>Trzymaj czystą grę i zoptymalizowane konfiguracje osobno.</p></div><button class="button button-primary" id="new-profile">＋ Nowy profil</button></div>
+          <div class="profile-banner"><div class="profile-banner-mark">◈</div><div><span class="eyebrow muted">AKTYWNY PROFIL</span><h2 id="profile-name">Vanilla 1.21.4</h2><p id="profile-description">Czysta instalacja do bazowych pomiarów wydajności.</p></div><span class="pill neutral">GRA NIEPOŁĄCZONA</span></div>
+          <div class="profile-grid" id="profiles-grid"></div>
+          <section class="panel runtime-panel"><div class="panel-heading"><div><span class="eyebrow muted">LOKALNA KONFIGURACJA</span><h3>Runtime i pamięć</h3></div><span class="pill neutral">DO SKONFIGUROWANIA</span></div><div class="runtime-row"><div><b>Java Runtime</b><small>Wymagana do uruchomienia gry. Można pobrać do katalogu użytkownika bez uprawnień administratora.</small></div><button class="button button-outline" id="java-button">Pobierz Javę</button></div><div class="runtime-row"><div><b>Pamięć RAM</b><small>Alokacja powinna zależeć od pamięci urządzenia i liczby modów.</small></div><span class="runtime-value">4 GB <span>⌄</span></span></div></section>
+          <footer class="footer-note"><span>PROFILE / LOCAL USER DATA</span><span>NO SYSTEM-WIDE INSTALLATION REQUIRED.</span></footer>
+        </section>
+
+        <section class="view" id="view-benchmarks">
+          <div class="page-title-row"><div><div class="eyebrow"><span class="eyebrow-line"></span> LICZBY ZAMIAST DOMYSŁÓW</div><h1>Measure <span>what matters.</span></h1><p>Wersja 1 protokołu benchmarku — porównanie Vanilla z profilem zoptymalizowanym.</p></div><button class="button button-primary" id="run-benchmark" disabled>▶ Rozpocznij benchmark</button></div>
+          <div class="benchmark-hero"><div class="benchmark-hero-copy"><span class="eyebrow muted">PROTOKÓŁ V1 · LOKALNY POMIAR</span><h2>Powtarzalne warunki.<br /><span>Rzetelny wynik.</span></h2><p>Porównujemy tę samą wersję gry na tym samym urządzeniu. Bez wybierania najlepszego przebiegu i bez wysyłania danych.</p></div><div class="benchmark-rings"><div class="ring ring-outer"><div class="ring ring-inner"><span>03</span><small>RUNS</small></div></div><span class="ring-caption">POWTARZALNOŚĆ<br /><b>3 PRZEBIEGI</b></span></div></div>
+          <div class="protocol-grid"><article class="protocol-card"><span class="protocol-num">01 / WARUNKI</span><h3>Utrzymaj stałe zmienne</h3><ul><li>Ta sama wersja Minecrafta i Javy</li><li>Ta sama rozdzielczość i grafika</li><li>Ten sam świat, seed i ruch kamery</li><li>Powtarzalne warunki termiczne</li></ul></article><article class="protocol-card"><span class="protocol-num">02 / POMIAR</span><h3>Rozgrzej, potem mierz</h3><div class="timeline"><div><b>60 s</b><span>rozgrzewka</span></div><i></i><div><b>180 s</b><span>pomiar</span></div><i></i><div><b>× 3</b><span>powtórzenia</span></div></div><p>Wykonaj osobno dla czystej instalacji i profilu zoptymalizowanego.</p></article><article class="protocol-card"><span class="protocol-num">03 / METRYKI</span><h3>Pełniejszy obraz</h3><div class="metric-lines"><div><span>Mediana FPS</span><b>GŁÓWNA</b></div><div><span>1% low</span><b>PŁYNNOŚĆ</b></div><div><span>Frametime p50 / p95 / p99</span><b>STABILNOŚĆ</b></div><div><span>Czas uruchomienia</span><b>LAUNCHER</b></div></div></article><article class="protocol-card threshold-card"><span class="protocol-num">04 / WIARYGODNOŚĆ</span><h3>Progi przed testem</h3><div class="threshold"><strong>≤ 3%</strong><span>różnicy między powtórzeniami<br />powyżej: wynik niestabilny</span></div><div class="threshold"><strong>≥ 5%</strong><span>poprawy mediany i 1% low<br />wstępny cel optymalizacji</span></div><small class="disclaimer">Progi są punktem startowym, a nie gwarancją wzrostu FPS na każdym sprzęcie.</small></article></div>
+          <div class="privacy-note"><span>◎</span><div><b>Twoje dane zostają lokalnie.</b><p>Raport zawiera model sprzętu, ustawienia, wersje gry i modów oraz wyniki przebiegów. Wysłanie raportu wymaga osobnej decyzji.</p></div><button id="export-report" class="link-button">Eksportuj JSON ↗</button></div>
+          <section class="panel result-panel"><div class="panel-heading"><div><span class="eyebrow muted">HISTORIA POMIARÓW</span><h3>Ostatnie wyniki</h3></div><span class="pill neutral" id="benchmark-status">BRAK POMIARÓW</span></div><div id="benchmark-results" class="empty-results"><span>⌁</span><b>Tu pojawią się wyniki</b><small>Najpierw połącz instalację gry i przygotuj świat testowy.</small></div></section>
+          <footer class="footer-note"><span>BENCHMARKS / VERSION 1</span><span>MEDIAN · 1% LOW · FRAME TIME PERCENTILES</span></footer>
+        </section>
+
+        <section class="view" id="view-settings">
+          <div class="page-title-row"><div><div class="eyebrow"><span class="eyebrow-line"></span> LOKALNIE I BEZ ADMINA</div><h1>Ustawienia <span>urządzenia.</span></h1><p>Vlauncher działa w katalogu użytkownika i nie zmienia ustawień systemowych.</p></div></div>
+          <div class="settings-grid"><article class="panel setting-card"><span class="setting-icon">⌘</span><h3>Katalog gry</h3><p>Zaloguj konto Minecraft przez kod urządzenia Microsoft. Vlauncher nie prosi o hasło; identyfikator aplikacji Microsoft podajesz samodzielnie.</p><button class="button button-outline" id="connect-game">Zaloguj Microsoft <span>↗</span></button></article><article class="panel setting-card"><span class="setting-icon">◌</span><h3>Java Runtime</h3><p>Pobierz Java Runtime zgodne z wersją gry. Zostanie zapisane w katalogu użytkownika.</p><button class="button button-outline" data-view="profiles">Konfiguruj Javę <span>↗</span></button></article><article class="panel setting-card"><span class="setting-icon">◎</span><h3>Telemetria benchmarków</h3><p>Pomiary zapisujemy lokalnie. Udostępnianie raportu będzie zawsze opcjonalne.</p><span class="pill green">LOKALNIE</span></article></div>
+          <div class="about-card"><div class="brand-mark large"><i></i><i></i><i></i><i></i></div><div><span class="eyebrow muted">ABOUT VLAUNCHER</span><h2>Open source by design.</h2><p>Niezależny launcher społecznościowy. Projekt nie jest powiązany z Mojang ani Microsoft.</p></div><span class="version-label">PROTOTYPE 0.1</span></div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <dialog class="modal" id="modal"><form method="dialog"><button class="modal-close" aria-label="Zamknij">×</button><span class="eyebrow muted" id="modal-eyebrow">VANTA</span><h2 id="modal-title">Połącz instalację</h2><p id="modal-copy">Wersja demonstracyjna nie łączy się jeszcze z katalogiem Minecrafta.</p><div class="modal-actions"><button class="button button-quiet" value="cancel">Wróć</button><button class="button button-primary" id="modal-action" value="ok">Rozumiem</button></div></form></dialog>
+    <script src="app.js"></script>
+  </body>
+</html>
+
