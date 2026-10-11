@@ -1,5 +1,6 @@
 use std::{fs,path::PathBuf,sync::Mutex,time::Duration};
 use serde::{Deserialize,Serialize};
+use tauri::Manager;
 use sha2::{Digest,Sha512};
 use launcher_core::paths::{AppPaths,InstanceId,safe_join};
 const API:&str="https://api.modrinth.com/v2";
@@ -11,7 +12,7 @@ struct Profile{id:String,name:String,minecraft_version:String,loader:String}
 #[derive(Serialize)]
 #[serde(rename_all="camelCase")]
 struct ProfileResult{profiles:Vec<Profile>,active_profile_id:Option<String>}
-#[derive(Serialize,Deserialize)]
+#[derive(Clone,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
 struct Installed{project_id:String,file_name:String,sha512:String}
 #[derive(Serialize,Deserialize)]
